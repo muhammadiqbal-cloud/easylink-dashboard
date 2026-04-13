@@ -1,3 +1,4 @@
+import pandas as pd
 import plotly.express as px
 import streamlit as st
 
@@ -48,6 +49,43 @@ if "Purpose" in filtered.columns:
     purposes = sorted(filtered["Purpose"].dropna().unique().tolist())
     selected_purposes = st.sidebar.multiselect("Purpose", purposes, default=purposes)
     filtered = filtered[filtered["Purpose"].isin(selected_purposes)]
+if "Transaction Date" in filtered.columns and filtered["Transaction Date"].notna().any():
+    min_dt = filtered["Transaction Date"].min().date()
+    max_dt = filtered["Transaction Date"].max().date()
+
+    if "marketing_date_range" not in st.session_state:
+        st.session_state["marketing_date_range"] = [min_dt, max_dt]
+
+    current_range = st.session_state["marketing_date_range"]
+
+    if isinstance(current_range, (list, tuple)) and len(current_range) == 2:
+        current_start, current_end = current_range
+    else:
+        current_start, current_end = min_dt, max_dt
+
+    # Sesuaikan value agar tidak keluar dari batas data terbaru
+    if current_start < min_dt or current_start > max_dt:
+        current_start = min_dt
+    if current_end > max_dt or current_end < min_dt:
+        current_end = max_dt
+    if current_start > current_end:
+        current_start = min_dt
+        current_end = max_dt
+
+    date_range = st.sidebar.date_input(
+        "Custom Date",
+        value=[current_start, current_end],
+        min_value=min_dt,
+        max_value=max_dt,
+        key="marketing_date_range",
+    )
+
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start_date, end_date = date_range
+        filtered = filtered[
+            (filtered["Transaction Date"] >= pd.to_datetime(start_date)) &
+            (filtered["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
+        ]    
 
 # KPI marketing
 total_tx = len(filtered)
