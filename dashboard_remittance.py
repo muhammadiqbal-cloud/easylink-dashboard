@@ -6,6 +6,33 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Remittance Dashboard", layout="wide")
 
 
+def format_number(x):
+    try:
+        if pd.isna(x):
+            return "0"
+        return f"{x:,.0f}".replace(",", ".")
+    except Exception:
+        return x
+
+
+def format_currency(x):
+    try:
+        if pd.isna(x):
+            return "Rp 0"
+        return "Rp " + f"{x:,.0f}".replace(",", ".")
+    except Exception:
+        return x
+
+
+def format_percent(x):
+    try:
+        if pd.isna(x):
+            return "0%"
+        return f"{x:.2f}%"
+    except Exception:
+        return x
+
+
 # =========================
 # LOAD DATA FROM GOOGLE SHEETS
 # =========================
@@ -13,9 +40,7 @@ st.set_page_config(page_title="Remittance Dashboard", layout="wide")
 def load_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # Tambahkan nama sheet di sini kalau tahun baru sudah dibuat
     sheet_names = ["2023", "2024", "2025", "2026"]
-
     all_dfs = []
 
     for sheet_name in sheet_names:
@@ -140,13 +165,10 @@ def make_risk_flags(df):
 
         if row.get("flag_canceled", False):
             reasons.append("Canceled transaction")
-
         if row.get("flag_repeat_phone", False):
             reasons.append("Repeated phone number")
-
         if row.get("flag_repeat_email", False):
             reasons.append("Repeated email")
-
         if row.get("flag_high_amount", False):
             reasons.append("High transaction amount")
 
@@ -166,10 +188,8 @@ def make_risk_flags(df):
 
         if row.get("flag_canceled", False):
             categories.append("Operational")
-
         if row.get("flag_repeat_phone", False) or row.get("flag_repeat_email", False):
             categories.append("Behavioral")
-
         if row.get("flag_high_amount", False):
             categories.append("Financial")
 
@@ -212,6 +232,38 @@ def top_group(df, col):
     return out.sort_values(sort_cols, ascending=ascending_vals)
 
 
+def summarize_period(df_period):
+    summary = {
+        "total_transactions": len(df_period),
+        "total_amount": df_period["Amount Sent"].sum() if "Amount Sent" in df_period.columns else 0,
+        "avg_amount": df_period["Amount Sent"].mean() if "Amount Sent" in df_period.columns and len(df_period) > 0 else 0,
+        "canceled_transactions": df_period["flag_canceled"].sum() if "flag_canceled" in df_period.columns else 0,
+        "risk_transactions": (df_period["risk_score"] > 0).sum() if "risk_score" in df_period.columns else 0,
+    }
+
+    if summary["total_transactions"] > 0:
+        summary["cancel_rate_pct"] = round(
+            summary["canceled_transactions"] / summary["total_transactions"] * 100, 2
+        )
+    else:
+        summary["cancel_rate_pct"] = 0
+
+    return summary
+
+
+def get_period_df(df_source, start_date, end_date):
+    return df_source[
+        (df_source["Transaction Date"] >= pd.to_datetime(start_date)) &
+        (df_source["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
+    ].copy()
+
+
+def safe_pct_change(current, previous):
+    if previous in [0, None] or pd.isna(previous):
+        return None
+    return round((current - previous) / previous * 100, 2)
+
+
 def build_auto_insights(filtered):
     insights = []
 
@@ -220,10 +272,10 @@ def build_auto_insights(filtered):
     cancel_count = filtered["flag_canceled"].sum() if "flag_canceled" in filtered.columns else 0
     cancel_rate = (cancel_count / total_tx * 100) if total_tx > 0 else 0
 
-    insights.append(f"Total transaksi pada filter saat ini: {total_tx:,}")
+    insights.append(f"Total transaksi pada filter saat ini: {format_number(total_tx)}")
     if "Amount Sent" in filtered.columns:
-        insights.append(f"Total nominal terkirim: {total_amount:,.0f}")
-    insights.append(f"Persentase transaksi canceled: {cancel_rate:.2f}%")
+        insights.append(f"Total nominal terkirim: {format_currency(total_amount)}")
+    insights.append(f"Persentase transaksi canceled: {format_percent(cancel_rate)}")
 
     if "Account Type" in filtered.columns and not filtered.empty:
         account_summary = top_group(filtered, "Account Type")
@@ -231,7 +283,7 @@ def build_auto_insights(filtered):
             top_account = account_summary.iloc[0]
             insights.append(
                 f"Account type dominan: {top_account['Account Type']} "
-                f"({int(top_account['transactions'])} transaksi)"
+                f"({format_number(top_account['transactions'])} transaksi)"
             )
 
     if "Recipient Country" in filtered.columns and not filtered.empty:
@@ -240,7 +292,7 @@ def build_auto_insights(filtered):
             top_country = country_summary.iloc[0]
             insights.append(
                 f"Negara tujuan terbesar: {top_country['Recipient Country']} "
-                f"({int(top_country['transactions'])} transaksi)"
+                f"({format_number(top_country['transactions'])} transaksi)"
             )
 
     if "Platform" in filtered.columns and not filtered.empty:
@@ -249,7 +301,7 @@ def build_auto_insights(filtered):
             top_platform = platform_summary.iloc[0]
             insights.append(
                 f"Platform paling dominan: {top_platform['Platform']} "
-                f"({int(top_platform['transactions'])} transaksi)"
+                f"({format_number(top_platform['transactions'])} transaksi)"
             )
 
     if "Name" in filtered.columns and not filtered.empty:
@@ -258,7 +310,7 @@ def build_auto_insights(filtered):
             top_sender = sender_summary.iloc[0]
             insights.append(
                 f"Sender paling aktif: {top_sender['Name']} "
-                f"({int(top_sender['transactions'])} transaksi)"
+                f"({format_number(top_sender['transactions'])} transaksi)"
             )
 
     if "source_sheet" in filtered.columns and not filtered.empty:
@@ -267,11 +319,11 @@ def build_auto_insights(filtered):
             top_year = year_summary.iloc[0]
             insights.append(
                 f"Tab tahun paling aktif: {top_year['source_sheet']} "
-                f"({int(top_year['transactions'])} transaksi)"
+                f"({format_number(top_year['transactions'])} transaksi)"
             )
 
     risk_count = (filtered["risk_score"] > 0).sum() if "risk_score" in filtered.columns else 0
-    insights.append(f"Jumlah transaksi yang memiliki risk flag: {risk_count:,}")
+    insights.append(f"Jumlah transaksi yang memiliki risk flag: {format_number(risk_count)}")
 
     return insights
 
@@ -279,7 +331,7 @@ def build_auto_insights(filtered):
 # =========================
 # APP START
 # =========================
-st.title("Remittance Interactive Dashboard")
+st.title("Transaction Report Easylink")
 
 try:
     df_raw = load_data()
@@ -413,6 +465,46 @@ if "Name" in filtered.columns:
     filtered = filtered[filtered["Name"].isin(selected_sender)]
 
 # =========================
+# PERIOD COMPARISON SIDEBAR
+# =========================
+st.sidebar.subheader("Perbandingan Periode")
+
+enable_period_compare = st.sidebar.checkbox("Aktifkan Perbandingan Periode", value=False)
+
+period_1_df = pd.DataFrame()
+period_2_df = pd.DataFrame()
+
+if enable_period_compare and "Transaction Date" in filtered.columns and filtered["Transaction Date"].notna().any():
+    min_compare_dt = filtered["Transaction Date"].min().date()
+    max_compare_dt = filtered["Transaction Date"].max().date()
+
+    st.sidebar.markdown("**Period 1**")
+    period_1_range = st.sidebar.date_input(
+        "Pilih Period 1",
+        value=[min_compare_dt, max_compare_dt],
+        min_value=min_compare_dt,
+        max_value=max_compare_dt,
+        key="period_1_range"
+    )
+
+    st.sidebar.markdown("**Period 2**")
+    period_2_range = st.sidebar.date_input(
+        "Pilih Period 2",
+        value=[min_compare_dt, max_compare_dt],
+        min_value=min_compare_dt,
+        max_value=max_compare_dt,
+        key="period_2_range"
+    )
+
+    if isinstance(period_1_range, (list, tuple)) and len(period_1_range) == 2:
+        p1_start, p1_end = period_1_range
+        period_1_df = get_period_df(filtered, p1_start, p1_end)
+
+    if isinstance(period_2_range, (list, tuple)) and len(period_2_range) == 2:
+        p2_start, p2_end = period_2_range
+        period_2_df = get_period_df(filtered, p2_start, p2_end)
+
+# =========================
 # KPI
 # =========================
 total_tx = len(filtered)
@@ -423,11 +515,121 @@ cancel_rate = (cancel_count / total_tx * 100) if total_tx > 0 else 0
 risk_count = (filtered["risk_score"] > 0).sum() if "risk_score" in filtered.columns else 0
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Total Transaksi", f"{total_tx:,}")
-c2.metric("Total Amount Sent", f"{total_amount:,.0f}")
-c3.metric("Rata-rata Amount", f"{0 if pd.isna(avg_amount) else avg_amount:,.0f}")
-c4.metric("Canceled Rate", f"{cancel_rate:.2f}%")
-c5.metric("Risk Transactions", f"{risk_count:,}")
+c1.metric("Total Transaksi", format_number(total_tx))
+c2.metric("Total Amount Sent", format_currency(total_amount))
+c3.metric("Rata-rata Amount", format_currency(avg_amount))
+c4.metric("Canceled Rate", format_percent(cancel_rate))
+c5.metric("Risk Transactions", format_number(risk_count))
+
+# =========================
+# PERIOD COMPARISON OUTPUT
+# =========================
+if enable_period_compare:
+    st.subheader("Perbandingan Periode")
+
+    if period_1_df.empty or period_2_df.empty:
+        st.warning("Pilih dua periode yang valid.")
+    else:
+        period_1_summary = summarize_period(period_1_df)
+        period_2_summary = summarize_period(period_2_df)
+
+        comparison_df = pd.DataFrame([
+            {
+                "Metric": "Total Transaksi",
+                "Period 1": period_1_summary["total_transactions"],
+                "Period 2": period_2_summary["total_transactions"],
+            },
+            {
+                "Metric": "Total Amount",
+                "Period 1": period_1_summary["total_amount"],
+                "Period 2": period_2_summary["total_amount"],
+            },
+            {
+                "Metric": "Avg Amount",
+                "Period 1": period_1_summary["avg_amount"],
+                "Period 2": period_2_summary["avg_amount"],
+            },
+            {
+                "Metric": "Cancel Rate (%)",
+                "Period 1": period_1_summary["cancel_rate_pct"],
+                "Period 2": period_2_summary["cancel_rate_pct"],
+            },
+            {
+                "Metric": "Risk Transactions",
+                "Period 1": period_1_summary["risk_transactions"],
+                "Period 2": period_2_summary["risk_transactions"],
+            }
+        ])
+
+        comparison_df["Diff"] = comparison_df["Period 2"] - comparison_df["Period 1"]
+        comparison_df["% Change"] = comparison_df.apply(
+            lambda row: safe_pct_change(row["Period 2"], row["Period 1"]),
+            axis=1
+        )
+
+        display_df = comparison_df.copy().astype(object)
+
+        amount_metrics = ["Total Amount", "Avg Amount"]
+
+        for metric in amount_metrics:
+            mask = display_df["Metric"] == metric
+            display_df.loc[mask, "Period 1"] = display_df.loc[mask, "Period 1"].apply(format_currency)
+            display_df.loc[mask, "Period 2"] = display_df.loc[mask, "Period 2"].apply(format_currency)
+            display_df.loc[mask, "Diff"] = display_df.loc[mask, "Diff"].apply(format_currency)
+
+        non_amount_mask = ~display_df["Metric"].isin(amount_metrics)
+        display_df.loc[non_amount_mask, "Period 1"] = display_df.loc[non_amount_mask, "Period 1"].apply(format_number)
+        display_df.loc[non_amount_mask, "Period 2"] = display_df.loc[non_amount_mask, "Period 2"].apply(format_number)
+        display_df.loc[non_amount_mask, "Diff"] = display_df.loc[non_amount_mask, "Diff"].apply(format_number)
+
+        display_df["% Change"] = display_df["% Change"].apply(
+            lambda x: "-" if x is None else f"{x:.2f}%"
+        )
+
+        st.dataframe(display_df, use_container_width=True)
+
+        chart_df = comparison_df.melt(
+            id_vars="Metric",
+            value_vars=["Period 1", "Period 2"],
+            var_name="Period",
+            value_name="Value"
+        )
+
+        fig = px.bar(
+            chart_df,
+            x="Metric",
+            y="Value",
+            color="Period",
+            barmode="group",
+            title="Perbandingan KPI Antar Periode"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Perbandingan Negara Tujuan")
+
+        p1_country = top_group(period_1_df, "Recipient Country")
+        p2_country = top_group(period_2_df, "Recipient Country")
+
+        if not p1_country.empty or not p2_country.empty:
+            merged_country = pd.merge(
+                p1_country,
+                p2_country,
+                on="Recipient Country",
+                how="outer",
+                suffixes=("_p1", "_p2")
+            ).fillna(0)
+
+            merged_country["diff"] = merged_country["transactions_p2"] - merged_country["transactions_p1"]
+
+            display_country = merged_country.copy()
+            for col in ["transactions_p1", "transactions_p2", "diff"]:
+                if col in display_country.columns:
+                    display_country[col] = display_country[col].apply(format_number)
+            for col in ["total_amount_p1", "total_amount_p2"]:
+                if col in display_country.columns:
+                    display_country[col] = display_country[col].apply(format_currency)
+
+            st.dataframe(display_country.sort_values("Recipient Country"), use_container_width=True)
 
 # =========================
 # DEBUG FILTER
@@ -527,7 +729,21 @@ if "Account Type" in filtered.columns and not filtered.empty:
             account_compare["canceled_transactions"] / account_compare["total_transactions"] * 100
         ).round(2)
 
-    st.dataframe(account_compare, use_container_width=True)
+    display_account_compare = account_compare.copy()
+    if "total_transactions" in display_account_compare.columns:
+        display_account_compare["total_transactions"] = display_account_compare["total_transactions"].apply(format_number)
+    if "total_amount" in display_account_compare.columns:
+        display_account_compare["total_amount"] = display_account_compare["total_amount"].apply(format_currency)
+    if "avg_amount" in display_account_compare.columns:
+        display_account_compare["avg_amount"] = display_account_compare["avg_amount"].apply(format_currency)
+    if "canceled_transactions" in display_account_compare.columns:
+        display_account_compare["canceled_transactions"] = display_account_compare["canceled_transactions"].apply(format_number)
+    if "risk_transactions" in display_account_compare.columns:
+        display_account_compare["risk_transactions"] = display_account_compare["risk_transactions"].apply(format_number)
+    if "cancel_rate_pct" in display_account_compare.columns:
+        display_account_compare["cancel_rate_pct"] = display_account_compare["cancel_rate_pct"].apply(format_percent)
+
+    st.dataframe(display_account_compare, use_container_width=True)
 else:
     st.write("Data account type tidak tersedia.")
 
@@ -723,33 +939,27 @@ if "risk_score" in filtered.columns:
 else:
     risk_df = pd.DataFrame()
 
-st.dataframe(risk_df, use_container_width=True)
-st.subheader("Risk Transactions")
+display_risk_df = risk_df.copy()
+if "Amount Sent" in display_risk_df.columns:
+    display_risk_df["Amount Sent"] = display_risk_df["Amount Sent"].apply(format_currency)
+if "risk_score" in display_risk_df.columns:
+    display_risk_df["risk_score"] = display_risk_df["risk_score"].apply(format_number)
 
-risk_cols = [
-    "source_sheet", "Account Type", "Id", "Ref Id", "Transaction Date", "Name",
-    "Phone Number", "Email", "Recipient Country", "Recipient's name",
-    "Amount Sent", "Status",
-    "risk_category", "risk_reason", "risk_severity", "risk_score",
-    "flag_canceled", "flag_repeat_phone", "flag_repeat_email", "flag_high_amount"
-]
-risk_cols = [c for c in risk_cols if c in filtered.columns]
-
-if "risk_score" in filtered.columns:
-    risk_df = filtered[filtered["risk_score"] > 0][risk_cols].sort_values(
-        by=["risk_score", "Amount Sent"] if "Amount Sent" in filtered.columns else ["risk_score"],
-        ascending=[False, False] if "Amount Sent" in filtered.columns else [False]
-    )
-else:
-    risk_df = pd.DataFrame()
-
-st.dataframe(risk_df, use_container_width=True)
+st.dataframe(display_risk_df, use_container_width=True)
 
 # =========================
 # FILTERED DATA
 # =========================
 st.subheader("Filtered Data")
-st.dataframe(filtered, use_container_width=True)
+display_filtered = filtered.copy()
+if "Amount Sent" in display_filtered.columns:
+    display_filtered["Amount Sent"] = display_filtered["Amount Sent"].apply(format_currency)
+if "Recipient Gets amount" in display_filtered.columns:
+    display_filtered["Recipient Gets amount"] = display_filtered["Recipient Gets amount"].apply(format_number)
+if "Admin Fee (IDR)" in display_filtered.columns:
+    display_filtered["Admin Fee (IDR)"] = display_filtered["Admin Fee (IDR)"].apply(format_currency)
+
+st.dataframe(display_filtered, use_container_width=True)
 
 # =========================
 # DOWNLOAD CSV
