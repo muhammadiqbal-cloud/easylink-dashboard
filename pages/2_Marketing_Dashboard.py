@@ -100,10 +100,8 @@ with col4:
         st.plotly_chart(fig, use_container_width=True)
 
 # Customer behavior
-st.subheader("Customer Behavior")
-
-col5, col6, col7 = st.columns(3)
-
+with st.expander("Customer Behavior"):
+    col5, col6, col7 = st.columns(3)
 with col5:
     account_summary = top_group(filtered, "Account Type")
     if not account_summary.empty:
@@ -185,7 +183,7 @@ with st.expander("Detail Marketing Tables"):
     if "Admin Fee (IDR)" in display_filtered.columns:
         display_filtered["Admin Fee (IDR)"] = display_filtered["Admin Fee (IDR)"].apply(format_currency)
 
-    st.dataframe(display_filtered, use_container_width=True)
+    st.dataframe(display_filtered.head(200))
 
 csv_data = convert_df_to_csv(filtered)
 st.download_button(

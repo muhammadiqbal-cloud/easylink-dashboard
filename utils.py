@@ -205,6 +205,7 @@ def make_risk_flags(df):
     return df
 
 
+@st.cache_data(ttl=600)
 def prepare_data():
     df_raw = load_data()
     if df_raw is None or df_raw.empty:
