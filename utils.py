@@ -2,7 +2,59 @@ import pandas as pd
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 
+def apply_safe_date_filter(df, label="Custom Date", key="date_range"):
+    if "Transaction Date" not in df.columns or not df["Transaction Date"].notna().any():
+        return df
 
+    min_dt = df["Transaction Date"].min().date()
+    max_dt = df["Transaction Date"].max().date()
+
+    if key not in st.session_state:
+        st.session_state[key] = [min_dt, max_dt]
+
+    current_range = st.session_state.get(key, [min_dt, max_dt])
+
+    if isinstance(current_range, (list, tuple)) and len(current_range) == 2:
+        current_start, current_end = current_range
+    else:
+        current_start, current_end = min_dt, max_dt
+
+    if current_start < min_dt or current_start > max_dt:
+        current_start = min_dt
+    if current_end > max_dt or current_end < min_dt:
+        current_end = max_dt
+    if current_start > current_end:
+        current_start, current_end = min_dt, max_dt
+
+    safe_range = [current_start, current_end]
+    st.session_state[key] = safe_range
+
+    date_range = st.sidebar.date_input(
+        label,
+        value=safe_range,
+        min_value=min_dt,
+        max_value=max_dt,
+        key=f"{key}_widget",
+    )
+
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start_date, end_date = date_range
+
+        if start_date < min_dt:
+            start_date = min_dt
+        if end_date > max_dt:
+            end_date = max_dt
+        if start_date > end_date:
+            start_date, end_date = min_dt, max_dt
+
+        st.session_state[key] = [start_date, end_date]
+
+        return df[
+            (df["Transaction Date"] >= pd.to_datetime(start_date)) &
+            (df["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
+        ].copy()
+
+    return df
 def format_number(x):
     try:
         if pd.isna(x):

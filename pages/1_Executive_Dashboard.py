@@ -14,6 +14,7 @@ from utils import (
     get_period_df,
     safe_pct_change,
 )
+from utils import apply_safe_date_filter
 
 st.set_page_config(page_title="Executive Dashboard", layout="wide")
 st.title("Executive Dashboard")
@@ -41,18 +42,45 @@ if "Platform" in filtered.columns:
 if "Transaction Date" in filtered.columns and filtered["Transaction Date"].notna().any():
     min_dt = filtered["Transaction Date"].min().date()
     max_dt = filtered["Transaction Date"].max().date()
+
+    if "exec_date_range" not in st.session_state:
+        st.session_state["exec_date_range"] = [min_dt, max_dt]
+
+    current_range = st.session_state["exec_date_range"]
+
+    if isinstance(current_range, (list, tuple)) and len(current_range) == 2:
+        current_start, current_end = current_range
+    else:
+        current_start, current_end = min_dt, max_dt
+
+    # Sesuaikan value agar tidak keluar dari batas data terbaru
+    if current_start < min_dt or current_start > max_dt:
+        current_start = min_dt
+    if current_end > max_dt or current_end < min_dt:
+        current_end = max_dt
+    if current_start > current_end:
+        current_start = min_dt
+        current_end = max_dt
+
     date_range = st.sidebar.date_input(
-        "Range Tanggal",
-        value=[min_dt, max_dt],
+        "Custom Date",
+        value=[current_start, current_end],
         min_value=min_dt,
         max_value=max_dt,
+        key="exec_date_range",
     )
+
     if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
         start_date, end_date = date_range
         filtered = filtered[
             (filtered["Transaction Date"] >= pd.to_datetime(start_date)) &
             (filtered["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
         ]
+    filtered = apply_safe_date_filter(
+    filtered,
+    label="Custom Date",
+    key="marketing_date_range"
+)    
 
 # KPI
 total_tx = len(filtered)
