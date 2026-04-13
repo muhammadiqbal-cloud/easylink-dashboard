@@ -13,8 +13,8 @@ from utils import (
     summarize_period,
     get_period_df,
     safe_pct_change,
+    apply_safe_date_filter,
 )
-from utils import apply_safe_date_filter
 
 st.set_page_config(page_title="Executive Dashboard", layout="wide")
 st.title("Executive Dashboard")
@@ -24,7 +24,6 @@ if df.empty:
     st.warning("Data tidak tersedia.")
     st.stop()
 
-# Filter ringkas
 st.sidebar.header("Executive Filter")
 
 filtered = df.copy()
@@ -39,50 +38,12 @@ if "Platform" in filtered.columns:
     selected_platforms = st.sidebar.multiselect("Platform", platforms, default=platforms)
     filtered = filtered[filtered["Platform"].isin(selected_platforms)]
 
-if "Transaction Date" in filtered.columns and filtered["Transaction Date"].notna().any():
-    min_dt = filtered["Transaction Date"].min().date()
-    max_dt = filtered["Transaction Date"].max().date()
-
-    if "exec_date_range" not in st.session_state:
-        st.session_state["exec_date_range"] = [min_dt, max_dt]
-
-    current_range = st.session_state["exec_date_range"]
-
-    if isinstance(current_range, (list, tuple)) and len(current_range) == 2:
-        current_start, current_end = current_range
-    else:
-        current_start, current_end = min_dt, max_dt
-
-    # Sesuaikan value agar tidak keluar dari batas data terbaru
-    if current_start < min_dt or current_start > max_dt:
-        current_start = min_dt
-    if current_end > max_dt or current_end < min_dt:
-        current_end = max_dt
-    if current_start > current_end:
-        current_start = min_dt
-        current_end = max_dt
-
-    date_range = st.sidebar.date_input(
-        "Custom Date",
-        value=[current_start, current_end],
-        min_value=min_dt,
-        max_value=max_dt,
-        key="exec_date_range",
-    )
-
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_date, end_date = date_range
-        filtered = filtered[
-            (filtered["Transaction Date"] >= pd.to_datetime(start_date)) &
-            (filtered["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
-        ]
-    filtered = apply_safe_date_filter(
+filtered = apply_safe_date_filter(
     filtered,
     label="Custom Date",
-    key="marketing_date_range"
-)    
+    key="exec_date_range"
+)
 
-# KPI
 total_tx = len(filtered)
 total_amount = filtered["Amount Sent"].sum() if "Amount Sent" in filtered.columns else 0
 avg_amount = filtered["Amount Sent"].mean() if "Amount Sent" in filtered.columns else 0
@@ -97,16 +58,14 @@ if len(ms) >= 2:
     growth_pct = safe_pct_change(ms.iloc[-1]["transactions"], ms.iloc[-2]["transactions"])
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Total Transactions", format_number(total_tx), delta=f"{growth_pct:.2f}%" if growth_pct is not None else None)
+c1.metric("Total Transactions", format_number(total_tx), delta=f"{growth_pct:.2f}% vs prev month" if growth_pct is not None else None)
 c2.metric("Total Amount Sent", format_currency(total_amount))
 c3.metric("Avg Amount", format_currency(avg_amount))
 c4.metric("Success Rate", format_percent(success_rate))
 c5.metric("Cancel Rate", format_percent(cancel_rate))
 c6.metric("Risk Transactions", format_number(risk_count))
 
-# Trend utama
 st.subheader("Monthly Trends")
-
 col1, col2 = st.columns(2)
 
 with col1:
@@ -119,9 +78,7 @@ with col2:
         fig = px.line(ms, x="period", y="total_amount", markers=True, title="Monthly Amount Trend")
         st.plotly_chart(fig, use_container_width=True)
 
-# Top drivers
 st.subheader("Top Business Drivers")
-
 col3, col4, col5 = st.columns(3)
 
 with col3:
@@ -142,9 +99,7 @@ with col5:
         fig = px.pie(account_summary, names="Account Type", values="transactions", title="Account Type Mix")
         st.plotly_chart(fig, use_container_width=True)
 
-# Risk overview
 st.subheader("Risk Overview")
-
 col6, col7 = st.columns(2)
 
 with col6:
@@ -157,9 +112,7 @@ with col7:
         fig = px.bar(ms, x="period", y="canceled_transactions", title="Canceled Trend by Month")
         st.plotly_chart(fig, use_container_width=True)
 
-# Period comparison
 st.subheader("Period Comparison")
-
 enable_compare = st.checkbox("Aktifkan perbandingan periode", value=False)
 
 if enable_compare and "Transaction Date" in filtered.columns and filtered["Transaction Date"].notna().any():
@@ -212,12 +165,10 @@ if enable_compare and "Transaction Date" in filtered.columns and filtered["Trans
 
         st.dataframe(comparison_df, use_container_width=True)
 
-# Strategic insights
 st.subheader("Strategic Insights")
 for i, insight in enumerate(build_auto_insights(filtered), start=1):
     st.write(f"{i}. {insight}")
 
-# Ringkasan tabel
 with st.expander("Executive Summary Tables"):
     col8, col9, col10 = st.columns(3)
 

@@ -2,59 +2,7 @@ import pandas as pd
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 
-def apply_safe_date_filter(df, label="Custom Date", key="date_range"):
-    if "Transaction Date" not in df.columns or not df["Transaction Date"].notna().any():
-        return df
 
-    min_dt = df["Transaction Date"].min().date()
-    max_dt = df["Transaction Date"].max().date()
-
-    if key not in st.session_state:
-        st.session_state[key] = [min_dt, max_dt]
-
-    current_range = st.session_state.get(key, [min_dt, max_dt])
-
-    if isinstance(current_range, (list, tuple)) and len(current_range) == 2:
-        current_start, current_end = current_range
-    else:
-        current_start, current_end = min_dt, max_dt
-
-    if current_start < min_dt or current_start > max_dt:
-        current_start = min_dt
-    if current_end > max_dt or current_end < min_dt:
-        current_end = max_dt
-    if current_start > current_end:
-        current_start, current_end = min_dt, max_dt
-
-    safe_range = [current_start, current_end]
-    st.session_state[key] = safe_range
-
-    date_range = st.sidebar.date_input(
-        label,
-        value=safe_range,
-        min_value=min_dt,
-        max_value=max_dt,
-        key=f"{key}_widget",
-    )
-
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_date, end_date = date_range
-
-        if start_date < min_dt:
-            start_date = min_dt
-        if end_date > max_dt:
-            end_date = max_dt
-        if start_date > end_date:
-            start_date, end_date = min_dt, max_dt
-
-        st.session_state[key] = [start_date, end_date]
-
-        return df[
-            (df["Transaction Date"] >= pd.to_datetime(start_date)) &
-            (df["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
-        ].copy()
-
-    return df
 def format_number(x):
     try:
         if pd.isna(x):
@@ -267,6 +215,7 @@ def prepare_data():
     return df
 
 
+@st.cache_data(ttl=300)
 def top_group(df, col):
     if col not in df.columns:
         return pd.DataFrame()
@@ -339,17 +288,17 @@ def build_auto_insights(filtered):
     insights.append(f"Persentase transaksi canceled: {format_percent(cancel_rate)}")
 
     if "Recipient Country" in filtered.columns and not filtered.empty:
-        top_country = top_group(filtered, "Recipient Country")
-        if not top_country.empty:
-            row = top_country.iloc[0]
+        tg = top_group(filtered, "Recipient Country")
+        if not tg.empty:
+            row = tg.iloc[0]
             insights.append(
                 f"Negara tujuan terbesar: {row['Recipient Country']} ({format_number(row['transactions'])} transaksi)"
             )
 
     if "Platform" in filtered.columns and not filtered.empty:
-        top_platform = top_group(filtered, "Platform")
-        if not top_platform.empty:
-            row = top_platform.iloc[0]
+        tg = top_group(filtered, "Platform")
+        if not tg.empty:
+            row = tg.iloc[0]
             insights.append(
                 f"Platform dominan: {row['Platform']} ({format_number(row['transactions'])} transaksi)"
             )
@@ -359,6 +308,7 @@ def build_auto_insights(filtered):
     return insights
 
 
+@st.cache_data(ttl=300)
 def monthly_summary(df):
     if df.empty or "Transaction Date" not in df.columns:
         return pd.DataFrame()
@@ -377,6 +327,68 @@ def monthly_summary(df):
 
     out["period"] = out["Year"].astype("Int64").astype(str) + "-" + out["Month"].astype("Int64").astype(str).str.zfill(2)
     return out
+
+
+def apply_safe_date_filter(df, label="Custom Date", key="date_range"):
+    if "Transaction Date" not in df.columns or not df["Transaction Date"].notna().any():
+        return df
+
+    min_dt = df["Transaction Date"].min().date()
+    max_dt = df["Transaction Date"].max().date()
+
+    state_key = f"{key}_state"
+    widget_key = f"{key}_widget"
+
+    current_range = st.session_state.get(state_key, [min_dt, max_dt])
+
+    if not (isinstance(current_range, (list, tuple)) and len(current_range) == 2):
+        current_range = [min_dt, max_dt]
+
+    current_start, current_end = current_range
+
+    if current_start < min_dt or current_start > max_dt:
+        current_start = min_dt
+    if current_end < min_dt or current_end > max_dt:
+        current_end = max_dt
+    if current_start > current_end:
+        current_start, current_end = min_dt, max_dt
+
+    safe_range = [current_start, current_end]
+    st.session_state[state_key] = safe_range
+
+    if widget_key in st.session_state:
+        widget_value = st.session_state[widget_key]
+        if isinstance(widget_value, (list, tuple)) and len(widget_value) == 2:
+            ws, we = widget_value
+            if ws < min_dt or ws > max_dt or we < min_dt or we > max_dt or ws > we:
+                st.session_state[widget_key] = safe_range
+
+    date_range = st.sidebar.date_input(
+        label,
+        value=safe_range,
+        min_value=min_dt,
+        max_value=max_dt,
+        key=widget_key,
+    )
+
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        start_date, end_date = date_range
+
+        if start_date < min_dt:
+            start_date = min_dt
+        if end_date > max_dt:
+            end_date = max_dt
+        if start_date > end_date:
+            start_date, end_date = min_dt, max_dt
+
+        st.session_state[state_key] = [start_date, end_date]
+
+        return df[
+            (df["Transaction Date"] >= pd.to_datetime(start_date)) &
+            (df["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
+        ].copy()
+
+    return df
 
 
 @st.cache_data
