@@ -88,15 +88,46 @@ def clean_data(df):
         if col in df.columns:
             df[col] = clean_numeric(df[col])
 
-    # Tanggal transaksi
+        # Tanggal transaksi
     if "Transaction Date" in df.columns:
-        df["Transaction Date"] = pd.to_datetime(
-            df["Transaction Date"],
-            errors="coerce",
-            dayfirst=True
+        tx = df["Transaction Date"].astype(str).str.strip()
+
+        # Bersihkan nilai kosong palsu
+        tx = tx.replace({
+            "nan": None,
+            "None": None,
+            "<NA>": None,
+            "NaT": None,
+            "": None
+        })
+
+        # Coba format utama: 16-06-2023 18:38:35
+        parsed_dt = pd.to_datetime(
+            tx,
+            format="%d-%m-%Y %H:%M:%S",
+            errors="coerce"
         )
 
-        # source_sheet otomatis dari tahun transaksi
+        # Fallback 1: format umum dayfirst
+        missing_mask = parsed_dt.isna()
+        if missing_mask.any():
+            parsed_dt.loc[missing_mask] = pd.to_datetime(
+                tx.loc[missing_mask],
+                errors="coerce",
+                dayfirst=True
+            )
+
+        # Fallback 2: format ISO / format lain
+        missing_mask = parsed_dt.isna()
+        if missing_mask.any():
+            parsed_dt.loc[missing_mask] = pd.to_datetime(
+                tx.loc[missing_mask],
+                errors="coerce"
+            )
+
+        df["Transaction Date"] = parsed_dt
+
+        # Tahun data otomatis dari tanggal transaksi
         df["source_sheet"] = df["Transaction Date"].dt.year.astype("Int64").astype(str)
         df["source_sheet"] = df["source_sheet"].replace("<NA>", "Unknown")
 
@@ -408,13 +439,23 @@ if "Transaction Date" in filtered.columns and filtered["Transaction Date"].notna
         selected_year = st.sidebar.selectbox("Pilih Tahun", available_years)
 
         month_map = {
-            "Januari": 1, "Februari": 2, "Maret": 3, "April": 4,
-            "Mei": 5, "Juni": 6, "Juli": 7, "Agustus": 8,
-            "September": 9, "Oktober": 10, "November": 11, "Desember": 12
+            1: "Januari", 2: "Februari", 3: "Maret", 4: "April",
+            5: "Mei", 6: "Juni", 7: "Juli", 8: "Agustus",
+            9: "September", 10: "Oktober", 11: "November", 12: "Desember"
         }
-        selected_month_name = st.sidebar.selectbox("Pilih Bulan", list(month_map.keys()))
-        selected_month = month_map[selected_month_name]
 
+        available_month_numbers = sorted(
+            filtered.loc[
+                filtered["Transaction Date"].dt.year == selected_year,
+                "Transaction Date"
+            ].dt.month.dropna().unique().astype(int).tolist()
+        )
+
+        available_month_names = [month_map[m] for m in available_month_numbers]
+        selected_month_name = st.sidebar.selectbox("Pilih Bulan", available_month_names)
+
+        reverse_month_map = {v: k for k, v in month_map.items()}
+        selected_month = reverse_month_map[selected_month_name]
         filtered = filtered[
             (filtered["Transaction Date"].dt.year == selected_year) &
             (filtered["Transaction Date"].dt.month == selected_month)
