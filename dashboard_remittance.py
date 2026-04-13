@@ -6,6 +6,9 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Remittance Dashboard", layout="wide")
 
 
+# =========================
+# FORMATTER
+# =========================
 def format_number(x):
     try:
         if pd.isna(x):
@@ -39,29 +42,33 @@ def format_percent(x):
 @st.cache_data(ttl=300)
 def load_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
+    df = conn.read(ttl=0)
 
-    try:
-        df = conn.read(ttl=0)
-
-        if df is not None and not df.empty:
-            if "source_sheet" not in df.columns:
-                st.warning("Kolom 'source_sheet' tidak ditemukan di sheet gabungan.")
-            else:
-                df["source_sheet"] = df["source_sheet"].astype(str).str.strip()
-
-            return df
-
+    if df is None:
         return pd.DataFrame()
 
-    except Exception as e:
-        st.error(f"Gagal membaca Google Sheets: {e}")
-        return pd.DataFrame()# =========================
+    return df.copy()
+
+
+# =========================
 # CLEANING
 # =========================
+def clean_numeric(series):
+    return pd.to_numeric(
+        series.astype(str)
+        .str.strip()
+        .str.replace("Rp", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False),
+        errors="coerce"
+    )
+
+
 def clean_data(df):
     df = df.copy()
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
 
+    # Kolom teks
     text_cols = [
         "Ref Id", "Remittance Channel", "Account Type", "Phone Number", "Email", "Name",
         "Status", "Amount Sent currency", "Recipient Gets currency", "Recipient Country",
@@ -73,40 +80,49 @@ def clean_data(df):
     for col in text_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].replace({"nan": "", "None": ""})
+            df[col] = df[col].replace({"nan": "", "None": "", "<NA>": ""})
 
+    # Kolom angka
     numeric_cols = ["Amount Sent", "Recipient Gets amount", "Admin Fee (IDR)"]
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace(",", "", regex=False)
-                .str.replace(" ", "", regex=False)
-            )
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = clean_numeric(df[col])
 
+    # Tanggal transaksi
     if "Transaction Date" in df.columns:
         df["Transaction Date"] = pd.to_datetime(
             df["Transaction Date"],
-            format="%d-%m-%Y %H:%M:%S",
-            errors="coerce"
+            errors="coerce",
+            dayfirst=True
         )
 
+        # source_sheet otomatis dari tahun transaksi
+        df["source_sheet"] = df["Transaction Date"].dt.year.astype("Int64").astype(str)
+        df["source_sheet"] = df["source_sheet"].replace("<NA>", "Unknown")
+
+        df["Date"] = df["Transaction Date"].dt.date
+        df["Hour"] = df["Transaction Date"].dt.hour
+        df["Year"] = df["Transaction Date"].dt.year
+        df["Month"] = df["Transaction Date"].dt.month
+    else:
+        df["source_sheet"] = "Unknown"
+
+    # Status clean
     if "Status" in df.columns:
         df["Status_clean"] = df["Status"].astype(str).str.lower().str.strip()
     else:
         df["Status_clean"] = ""
 
+    # Isi unknown
     fill_unknown_cols = [
         "Recipient Country", "Platform", "Payment Method",
         "Purpose", "Relationship", "Name", "source_sheet", "Account Type"
     ]
-
     for col in fill_unknown_cols:
         if col in df.columns:
             df[col] = df[col].replace("", "Unknown").fillna("Unknown")
 
+    # Normalisasi negara
     if "Recipient Country" in df.columns:
         df["Recipient Country"] = df["Recipient Country"].replace({
             "USA": "United States",
@@ -114,12 +130,6 @@ def clean_data(df):
             "UK": "United Kingdom",
             "UAE": "United Arab Emirates"
         })
-
-    if "Transaction Date" in df.columns:
-        df["Date"] = df["Transaction Date"].dt.date
-        df["Hour"] = df["Transaction Date"].dt.hour
-        df["Year"] = df["Transaction Date"].dt.year
-        df["Month"] = df["Transaction Date"].dt.month
 
     return df
 
@@ -159,7 +169,6 @@ def make_risk_flags(df):
 
     def build_risk_reason(row):
         reasons = []
-
         if row.get("flag_canceled", False):
             reasons.append("Canceled transaction")
         if row.get("flag_repeat_phone", False):
@@ -168,28 +177,25 @@ def make_risk_flags(df):
             reasons.append("Repeated email")
         if row.get("flag_high_amount", False):
             reasons.append("High transaction amount")
-
         return ", ".join(reasons) if reasons else "No risk"
 
     def build_risk_severity(score):
         if score >= 3:
             return "High"
-        elif score == 2:
+        if score == 2:
             return "Medium"
-        elif score == 1:
+        if score == 1:
             return "Low"
         return "No Risk"
 
     def build_risk_category(row):
         categories = []
-
         if row.get("flag_canceled", False):
             categories.append("Operational")
         if row.get("flag_repeat_phone", False) or row.get("flag_repeat_email", False):
             categories.append("Behavioral")
         if row.get("flag_high_amount", False):
             categories.append("Financial")
-
         return ", ".join(sorted(set(categories))) if categories else "None"
 
     df["risk_reason"] = df.apply(build_risk_reason, axis=1)
@@ -213,11 +219,7 @@ def top_group(df, col):
     if "Amount Sent" in df.columns:
         agg_dict["total_amount"] = ("Amount Sent", "sum")
 
-    out = (
-        df.groupby(col, dropna=False)
-        .agg(**agg_dict)
-        .reset_index()
-    )
+    out = df.groupby(col, dropna=False).agg(**agg_dict).reset_index()
 
     sort_cols = ["transactions"]
     ascending_vals = [False]
@@ -315,7 +317,7 @@ def build_auto_insights(filtered):
         if not year_summary.empty:
             top_year = year_summary.iloc[0]
             insights.append(
-                f"Tab tahun paling aktif: {top_year['source_sheet']} "
+                f"Tahun data paling aktif: {top_year['source_sheet']} "
                 f"({format_number(top_year['transactions'])} transaksi)"
             )
 
@@ -337,7 +339,7 @@ except Exception as e:
     st.stop()
 
 if df_raw is None or df_raw.empty:
-    st.warning("Data di Google Sheets kosong atau semua sheet tahun tidak terbaca.")
+    st.warning("Data di Google Sheets kosong atau tidak terbaca.")
     st.stop()
 
 col_a, col_b = st.columns([1, 6])
@@ -358,7 +360,7 @@ st.sidebar.header("Filter Dashboard")
 if "source_sheet" in filtered.columns:
     source_options = sorted(filtered["source_sheet"].dropna().unique().tolist())
     selected_source = st.sidebar.multiselect(
-        "Tahun Data (Tab Sheet)",
+        "Tahun Data",
         source_options,
         default=source_options
     )
@@ -565,7 +567,6 @@ if enable_period_compare:
         )
 
         display_df = comparison_df.copy().astype(object)
-
         amount_metrics = ["Total Amount", "Avg Amount"]
 
         for metric in amount_metrics:
@@ -641,56 +642,6 @@ with st.expander("Debug Filter"):
             df["source_sheet"]
             .value_counts(dropna=False)
             .rename_axis("source_sheet")
-            .reset_index(name="transactions"),
-            use_container_width=True
-        )
-
-    if "source_sheet" in filtered.columns:
-        st.write("Jumlah transaksi per source_sheet (filtered):")
-        st.dataframe(
-            filtered["source_sheet"]
-            .value_counts(dropna=False)
-            .rename_axis("source_sheet")
-            .reset_index(name="transactions"),
-            use_container_width=True
-        )
-
-    if "Account Type" in df.columns:
-        st.write("Jumlah transaksi per Account Type (raw):")
-        st.dataframe(
-            df["Account Type"]
-            .value_counts(dropna=False)
-            .rename_axis("Account Type")
-            .reset_index(name="transactions"),
-            use_container_width=True
-        )
-
-    if "Account Type" in filtered.columns:
-        st.write("Jumlah transaksi per Account Type (filtered):")
-        st.dataframe(
-            filtered["Account Type"]
-            .value_counts(dropna=False)
-            .rename_axis("Account Type")
-            .reset_index(name="transactions"),
-            use_container_width=True
-        )
-
-    if "Status" in df.columns:
-        st.write("Jumlah transaksi per status (raw):")
-        st.dataframe(
-            df["Status"]
-            .value_counts(dropna=False)
-            .rename_axis("Status")
-            .reset_index(name="transactions"),
-            use_container_width=True
-        )
-
-    if "Status" in filtered.columns:
-        st.write("Jumlah transaksi per status (filtered):")
-        st.dataframe(
-            filtered["Status"]
-            .value_counts(dropna=False)
-            .rename_axis("Status")
             .reset_index(name="transactions"),
             use_container_width=True
         )
@@ -843,7 +794,7 @@ if "Account Type" in filtered.columns and not filtered.empty:
         st.plotly_chart(fig, use_container_width=True)
 
 if "source_sheet" in filtered.columns:
-    st.subheader("Distribusi Data per Tab Tahun")
+    st.subheader("Distribusi Data per Tahun")
     source_summary = top_group(filtered, "source_sheet")
     if not source_summary.empty:
         fig = px.bar(
@@ -929,9 +880,15 @@ risk_cols = [
 risk_cols = [c for c in risk_cols if c in filtered.columns]
 
 if "risk_score" in filtered.columns:
+    sort_cols = ["risk_score"]
+    ascending = [False]
+    if "Amount Sent" in filtered.columns:
+        sort_cols.append("Amount Sent")
+        ascending.append(False)
+
     risk_df = filtered[filtered["risk_score"] > 0][risk_cols].sort_values(
-        by=["risk_score", "Amount Sent"] if "Amount Sent" in filtered.columns else ["risk_score"],
-        ascending=[False, False] if "Amount Sent" in filtered.columns else [False]
+        by=sort_cols,
+        ascending=ascending
     )
 else:
     risk_df = pd.DataFrame()
@@ -949,6 +906,7 @@ st.dataframe(display_risk_df, use_container_width=True)
 # =========================
 st.subheader("Filtered Data")
 display_filtered = filtered.copy()
+
 if "Amount Sent" in display_filtered.columns:
     display_filtered["Amount Sent"] = display_filtered["Amount Sent"].apply(format_currency)
 if "Recipient Gets amount" in display_filtered.columns:
