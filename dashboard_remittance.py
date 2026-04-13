@@ -919,10 +919,17 @@ st.dataframe(display_filtered, use_container_width=True)
 # =========================
 # DOWNLOAD CSV
 # =========================
-csv = filtered.to_csv(index=False).encode("utf-8")
+@st.cache_data
+def convert_df_to_csv(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+csv_data = convert_df_to_csv(filtered)
+
 st.download_button(
     label="Download filtered data as CSV",
-    data=csv,
+    data=csv_data,
     file_name="filtered_remittance_data.csv",
-    mime="text/csv"
+    mime="text/csv",
+    key="download_filtered_csv",
+    on_click="ignore",
 )
