@@ -9,6 +9,13 @@ from utils import (
     monthly_summary,
     convert_df_to_csv,
     apply_safe_date_filter,
+    repeat_vs_new_summary,
+    customer_segments,
+    platform_monthly_growth,
+    country_monthly_growth,
+    drop_detection,
+    voucher_promo_summary,
+    build_marketing_advanced_insights,
 )
 
 st.set_page_config(page_title="Marketing Dashboard", layout="wide")
@@ -21,6 +28,9 @@ if df.empty:
 
 filtered = df.copy()
 
+# =========================
+# SIDEBAR FILTER
+# =========================
 st.sidebar.header("Marketing Filter")
 
 if "source_sheet" in filtered.columns:
@@ -54,6 +64,9 @@ filtered = apply_safe_date_filter(
     key="marketing_date_range"
 )
 
+# =========================
+# KPI
+# =========================
 total_tx = len(filtered)
 total_amount = filtered["Amount Sent"].sum() if "Amount Sent" in filtered.columns else 0
 avg_amount = filtered["Amount Sent"].mean() if "Amount Sent" in filtered.columns else 0
@@ -69,37 +82,66 @@ c3.metric("Avg Amount", format_currency(avg_amount))
 c4.metric("Unique Sender", format_number(unique_sender))
 c5.metric("Repeat Sender", format_number(repeat_sender))
 
+# =========================
+# CHANNEL PERFORMANCE
+# =========================
 st.subheader("Channel Performance")
+
 col1, col2 = st.columns(2)
 
+platform_summary = top_group(filtered, "Platform").head(10)
+
 with col1:
-    platform_summary = top_group(filtered, "Platform").head(10)
     if not platform_summary.empty:
         fig = px.bar(platform_summary, x="Platform", y="transactions", title="Transactions by Platform")
         st.plotly_chart(fig, use_container_width=True)
 
 with col2:
-    platform_summary = top_group(filtered, "Platform").head(10)
     if not platform_summary.empty and "total_amount" in platform_summary.columns:
         fig = px.bar(platform_summary, x="Platform", y="total_amount", title="Amount by Platform")
         st.plotly_chart(fig, use_container_width=True)
 
+if not platform_summary.empty and "total_amount" in platform_summary.columns:
+    platform_perf = platform_summary.copy()
+    platform_perf["avg_value_per_tx"] = platform_perf["total_amount"] / platform_perf["transactions"]
+    st.dataframe(platform_perf, use_container_width=True)
+
+# =========================
+# MARKET OPPORTUNITY
+# =========================
 st.subheader("Market Opportunity")
+
 col3, col4 = st.columns(2)
 
+country_summary = top_group(filtered, "Recipient Country").head(10)
+purpose_summary = top_group(filtered, "Purpose").head(10)
+
 with col3:
-    country_summary = top_group(filtered, "Recipient Country").head(10)
     if not country_summary.empty:
         fig = px.bar(country_summary, x="Recipient Country", y="transactions", title="Top Recipient Country")
         st.plotly_chart(fig, use_container_width=True)
 
 with col4:
-    purpose_summary = top_group(filtered, "Purpose").head(10)
     if not purpose_summary.empty:
         fig = px.bar(purpose_summary, x="Purpose", y="transactions", title="Purpose Distribution")
         st.plotly_chart(fig, use_container_width=True)
 
+country_growth = country_monthly_growth(filtered)
+if not country_growth.empty:
+    latest_country_growth = (
+        country_growth.dropna(subset=["growth_pct"])
+        .sort_values("growth_pct", ascending=False)
+        .head(10)
+    )
+    if not latest_country_growth.empty:
+        st.write("Top Growing Countries")
+        st.dataframe(latest_country_growth[["Recipient Country", "period", "transactions", "growth_pct"]], use_container_width=True)
+
+# =========================
+# CUSTOMER BEHAVIOR
+# =========================
 st.subheader("Customer Behavior")
+
 col5, col6, col7 = st.columns(3)
 
 with col5:
@@ -120,46 +162,119 @@ with col7:
         fig = px.bar(sender_summary, x="Name", y="transactions", title="Top Active Sender")
         st.plotly_chart(fig, use_container_width=True)
 
-st.subheader("Monthly Marketing Trend")
-ms = monthly_summary(filtered)
-if not ms.empty:
+repeat_new = repeat_vs_new_summary(filtered)
+if not repeat_new.empty:
     col8, col9 = st.columns(2)
 
     with col8:
-        fig = px.line(ms, x="period", y="transactions", markers=True, title="Monthly Transactions")
+        fig = px.pie(repeat_new, names="segment", values="users", title="New vs Occasional vs Loyal Users")
         st.plotly_chart(fig, use_container_width=True)
 
     with col9:
+        seg_detail = customer_segments(filtered)
+        if not seg_detail.empty:
+            seg_summary = (
+                seg_detail.groupby("segment", dropna=False)
+                .agg(
+                    users=("Name", "count"),
+                    total_transactions=("transactions", "sum"),
+                    total_amount=("total_amount", "sum")
+                )
+                .reset_index()
+            )
+            st.dataframe(seg_summary, use_container_width=True)
+
+# =========================
+# GROWTH & DROP DETECTION
+# =========================
+st.subheader("Growth & Drop Detection")
+
+ms = monthly_summary(filtered)
+if not ms.empty:
+    col10, col11 = st.columns(2)
+
+    with col10:
+        fig = px.line(ms, x="period", y="transactions", markers=True, title="Monthly Transactions")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col11:
         fig = px.line(ms, x="period", y="total_amount", markers=True, title="Monthly Amount")
         st.plotly_chart(fig, use_container_width=True)
 
-st.subheader("Marketing Insights")
-insights = []
+platform_growth = platform_monthly_growth(filtered)
+if not platform_growth.empty:
+    latest_platform_growth = (
+        platform_growth.dropna(subset=["growth_pct"])
+        .sort_values("growth_pct", ascending=False)
+        .head(10)
+    )
+    if not latest_platform_growth.empty:
+        st.write("Top Growing Platforms")
+        st.dataframe(latest_platform_growth[["Platform", "period", "transactions", "growth_pct"]], use_container_width=True)
 
-if "Platform" in filtered.columns and not filtered.empty:
-    tg = top_group(filtered, "Platform")
-    if not tg.empty:
-        row = tg.iloc[0]
-        insights.append(f"Platform paling efektif saat ini adalah {row['Platform']} dengan {format_number(row['transactions'])} transaksi.")
+drops = drop_detection(filtered, threshold=-30)
+if not drops.empty:
+    st.warning("Detected significant monthly drops")
+    st.dataframe(drops[["period", "transactions", "growth_pct"]], use_container_width=True)
 
-if "Recipient Country" in filtered.columns and not filtered.empty:
-    tg = top_group(filtered, "Recipient Country")
-    if not tg.empty:
-        row = tg.iloc[0]
-        insights.append(f"Market tujuan terkuat ada di {row['Recipient Country']} dengan {format_number(row['transactions'])} transaksi.")
+# =========================
+# VOUCHER & PROMO ANALYSIS
+# =========================
+st.subheader("Voucher & Promo Analysis")
 
-if "Purpose" in filtered.columns and not filtered.empty:
-    tg = top_group(filtered, "Purpose")
-    if not tg.empty:
-        row = tg.iloc[0]
-        insights.append(f"Purpose paling dominan adalah {row['Purpose']}.")
+promo_data = voucher_promo_summary(filtered)
+voucher_col = promo_data.get("voucher_col")
+promo_col = promo_data.get("promo_col")
+discount_col = promo_data.get("discount_col")
+voucher_usage = promo_data.get("voucher_usage", None)
+promo_usage = promo_data.get("promo_usage", None)
+promo_vs_nonpromo = promo_data.get("promo_vs_nonpromo", None)
 
-insights.append(f"Jumlah repeat sender saat ini adalah {format_number(repeat_sender)}.")
-insights.append(f"Rata-rata nominal transaksi berada di {format_currency(avg_amount)}.")
+if not voucher_col and not promo_col:
+    st.info("Kolom voucher/promo belum ditemukan. Tambahkan kolom seperti 'Voucher Code', 'Promo Code', atau 'Promo Name'.")
+else:
+    st.write(f"Voucher column: {voucher_col if voucher_col else '-'}")
+    st.write(f"Promo column: {promo_col if promo_col else '-'}")
+    st.write(f"Discount column: {discount_col if discount_col else '-'}")
 
-for i, insight in enumerate(insights, start=1):
+    col12, col13 = st.columns(2)
+
+    with col12:
+        if voucher_usage is not None and not voucher_usage.empty:
+            fig = px.bar(voucher_usage.head(10), x=voucher_col, y="transactions", title="Top Voucher Usage")
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(voucher_usage.head(20), use_container_width=True)
+
+    with col13:
+        if promo_usage is not None and not promo_usage.empty:
+            fig = px.bar(promo_usage.head(10), x=promo_col, y="transactions", title="Top Promo Usage")
+            st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(promo_usage.head(20), use_container_width=True)
+
+    if promo_vs_nonpromo is not None and not promo_vs_nonpromo.empty:
+        col14, col15 = st.columns(2)
+
+        with col14:
+            fig = px.pie(promo_vs_nonpromo, names="promo_flag", values="transactions", title="Promo vs Non-Promo Transactions")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col15:
+            if "total_amount" in promo_vs_nonpromo.columns:
+                fig = px.bar(promo_vs_nonpromo, x="promo_flag", y="total_amount", title="Promo vs Non-Promo Amount")
+                st.plotly_chart(fig, use_container_width=True)
+
+        st.dataframe(promo_vs_nonpromo, use_container_width=True)
+
+# =========================
+# MARKETING INSIGHTS
+# =========================
+st.subheader("Marketing Advanced Insights")
+for i, insight in enumerate(build_marketing_advanced_insights(filtered), start=1):
     st.write(f"{i}. {insight}")
 
+# =========================
+# DETAIL TABLES
+# =========================
 with st.expander("Detail Marketing Tables"):
     st.write("Top Platform")
     st.dataframe(top_group(filtered, "Platform").head(20), use_container_width=True)

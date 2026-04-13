@@ -1,396 +1,258 @@
-import pandas as pd
-import streamlit as st
-from streamlit_gsheets import GSheetsConnection
-
-
-def format_number(x):
-    try:
-        if pd.isna(x):
-            return "0"
-        return f"{x:,.0f}".replace(",", ".")
-    except Exception:
-        return x
-
-
-def format_currency(x):
-    try:
-        if pd.isna(x):
-            return "Rp 0"
-        return "Rp " + f"{x:,.0f}".replace(",", ".")
-    except Exception:
-        return x
-
-
-def format_percent(x):
-    try:
-        if pd.isna(x):
-            return "0%"
-        return f"{x:.2f}%"
-    except Exception:
-        return x
+def first_existing_column(df, candidates):
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
 
 
 @st.cache_data(ttl=300)
-def load_data():
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(ttl=0)
-    if df is None:
+def customer_segments(df):
+    if "Name" not in df.columns or df.empty:
         return pd.DataFrame()
-    return df.copy()
 
-
-def clean_numeric(series):
-    return pd.to_numeric(
-        series.astype(str)
-        .str.strip()
-        .str.replace("Rp", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.replace(" ", "", regex=False),
-        errors="coerce"
+    user_counts = (
+        df.groupby("Name", dropna=False)
+        .agg(
+            transactions=("Id", "count") if "Id" in df.columns else ("Name", "count"),
+            total_amount=("Amount Sent", "sum") if "Amount Sent" in df.columns else ("Name", "count")
+        )
+        .reset_index()
     )
 
+    def segment(x):
+        if x == 1:
+            return "New"
+        elif x <= 3:
+            return "Occasional"
+        else:
+            return "Loyal"
 
-def clean_data(df):
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    text_cols = [
-        "Ref Id", "Remittance Channel", "Account Type", "Phone Number", "Email", "Name",
-        "Status", "Amount Sent currency", "Recipient Gets currency", "Recipient Country",
-        "Purpose", "Source of Funds", "Relationship", "Payment Method",
-        "Merchant Id", "Sender region", "Sender's address city", "Recipient's name",
-        "Platform", "source_sheet"
-    ]
-
-    for col in text_cols:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].replace({"nan": "", "None": "", "<NA>": ""})
-
-    numeric_cols = ["Amount Sent", "Recipient Gets amount", "Admin Fee (IDR)"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = clean_numeric(df[col])
-
-    if "Transaction Date" in df.columns:
-        tx = df["Transaction Date"].astype(str).str.strip()
-        tx = tx.replace({
-            "nan": None,
-            "None": None,
-            "<NA>": None,
-            "NaT": None,
-            "": None
-        })
-
-        parsed_dt = pd.to_datetime(
-            tx,
-            format="%d-%m-%Y %H:%M:%S",
-            errors="coerce"
-        )
-
-        missing_mask = parsed_dt.isna()
-        if missing_mask.any():
-            parsed_dt.loc[missing_mask] = pd.to_datetime(
-                tx.loc[missing_mask],
-                errors="coerce",
-                dayfirst=True
-            )
-
-        missing_mask = parsed_dt.isna()
-        if missing_mask.any():
-            parsed_dt.loc[missing_mask] = pd.to_datetime(
-                tx.loc[missing_mask],
-                errors="coerce"
-            )
-
-        df["Transaction Date"] = parsed_dt
-        df["source_sheet"] = df["Transaction Date"].dt.year.astype("Int64").astype(str)
-        df["source_sheet"] = df["source_sheet"].replace("<NA>", "Unknown")
-        df["Date"] = df["Transaction Date"].dt.date
-        df["Hour"] = df["Transaction Date"].dt.hour
-        df["Year"] = df["Transaction Date"].dt.year
-        df["Month"] = df["Transaction Date"].dt.month
-        df["Month Name"] = df["Transaction Date"].dt.strftime("%b %Y")
-    else:
-        df["source_sheet"] = "Unknown"
-
-    if "Status" in df.columns:
-        df["Status_clean"] = df["Status"].astype(str).str.lower().str.strip()
-    else:
-        df["Status_clean"] = ""
-
-    fill_unknown_cols = [
-        "Recipient Country", "Platform", "Payment Method",
-        "Purpose", "Relationship", "Name", "source_sheet", "Account Type"
-    ]
-    for col in fill_unknown_cols:
-        if col in df.columns:
-            df[col] = df[col].replace("", "Unknown").fillna("Unknown")
-
-    if "Recipient Country" in df.columns:
-        df["Recipient Country"] = df["Recipient Country"].replace({
-            "USA": "United States",
-            "US": "United States",
-            "UK": "United Kingdom",
-            "UAE": "United Arab Emirates"
-        })
-
-    return df
-
-
-def make_risk_flags(df):
-    df = df.copy()
-
-    df["flag_canceled"] = df["Status_clean"].str.contains("cancel", na=False)
-
-    df["flag_repeat_phone"] = False
-    if "Phone Number" in df.columns:
-        phone_counts = df["Phone Number"].value_counts()
-        repeat_phones = phone_counts[phone_counts > 1].index
-        df["flag_repeat_phone"] = df["Phone Number"].isin(repeat_phones)
-
-    df["flag_repeat_email"] = False
-    if "Email" in df.columns:
-        email_counts = df["Email"].value_counts()
-        repeat_emails = email_counts[email_counts > 1].index
-        df["flag_repeat_email"] = df["Email"].isin(repeat_emails)
-
-    df["flag_high_amount"] = False
-    if "Amount Sent" in df.columns and df["Amount Sent"].notna().sum() > 0:
-        threshold = df["Amount Sent"].quantile(0.95)
-        df["flag_high_amount"] = df["Amount Sent"] >= threshold
-
-    flag_cols = [
-        "flag_canceled",
-        "flag_repeat_phone",
-        "flag_repeat_email",
-        "flag_high_amount"
-    ]
-    df["risk_score"] = df[flag_cols].sum(axis=1)
-
-    def build_risk_reason(row):
-        reasons = []
-        if row.get("flag_canceled", False):
-            reasons.append("Canceled transaction")
-        if row.get("flag_repeat_phone", False):
-            reasons.append("Repeated phone number")
-        if row.get("flag_repeat_email", False):
-            reasons.append("Repeated email")
-        if row.get("flag_high_amount", False):
-            reasons.append("High transaction amount")
-        return ", ".join(reasons) if reasons else "No risk"
-
-    def build_risk_severity(score):
-        if score >= 3:
-            return "High"
-        if score == 2:
-            return "Medium"
-        if score == 1:
-            return "Low"
-        return "No Risk"
-
-    def build_risk_category(row):
-        categories = []
-        if row.get("flag_canceled", False):
-            categories.append("Operational")
-        if row.get("flag_repeat_phone", False) or row.get("flag_repeat_email", False):
-            categories.append("Behavioral")
-        if row.get("flag_high_amount", False):
-            categories.append("Financial")
-        return ", ".join(sorted(set(categories))) if categories else "None"
-
-    df["risk_reason"] = df.apply(build_risk_reason, axis=1)
-    df["risk_severity"] = df["risk_score"].apply(build_risk_severity)
-    df["risk_category"] = df.apply(build_risk_category, axis=1)
-    return df
-
-
-@st.cache_data(ttl=600)
-def prepare_data():
-    df_raw = load_data()
-    if df_raw is None or df_raw.empty:
-        return pd.DataFrame()
-    df = clean_data(df_raw)
-    df = make_risk_flags(df)
-    return df
+    user_counts["segment"] = user_counts["transactions"].apply(segment)
+    return user_counts
 
 
 @st.cache_data(ttl=300)
-def top_group(df, col):
-    if col not in df.columns:
-        return pd.DataFrame()
-
-    agg_dict = {
-        "transactions": ("Id", "count") if "Id" in df.columns else (col, "count")
-    }
-
-    if "Amount Sent" in df.columns:
-        agg_dict["total_amount"] = ("Amount Sent", "sum")
-
-    out = df.groupby(col, dropna=False).agg(**agg_dict).reset_index()
-
-    sort_cols = ["transactions"]
-    ascending_vals = [False]
-
-    if "total_amount" in out.columns:
-        sort_cols.append("total_amount")
-        ascending_vals.append(False)
-
-    return out.sort_values(sort_cols, ascending=ascending_vals)
-
-
-def summarize_period(df_period):
-    total_transactions = len(df_period)
-    total_amount = df_period["Amount Sent"].sum() if "Amount Sent" in df_period.columns else 0
-    avg_amount = df_period["Amount Sent"].mean() if "Amount Sent" in df_period.columns and total_transactions > 0 else 0
-    canceled_transactions = df_period["flag_canceled"].sum() if "flag_canceled" in df_period.columns else 0
-    risk_transactions = (df_period["risk_score"] > 0).sum() if "risk_score" in df_period.columns else 0
-    success_transactions = total_transactions - canceled_transactions
-    success_rate = (success_transactions / total_transactions * 100) if total_transactions > 0 else 0
-    cancel_rate = (canceled_transactions / total_transactions * 100) if total_transactions > 0 else 0
-
-    return {
-        "total_transactions": total_transactions,
-        "total_amount": total_amount,
-        "avg_amount": avg_amount,
-        "canceled_transactions": canceled_transactions,
-        "risk_transactions": risk_transactions,
-        "success_transactions": success_transactions,
-        "success_rate_pct": round(success_rate, 2),
-        "cancel_rate_pct": round(cancel_rate, 2),
-    }
-
-
-def get_period_df(df_source, start_date, end_date):
-    return df_source[
-        (df_source["Transaction Date"] >= pd.to_datetime(start_date)) &
-        (df_source["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
-    ].copy()
-
-
-def safe_pct_change(current, previous):
-    if previous in [0, None] or pd.isna(previous):
-        return None
-    return round((current - previous) / previous * 100, 2)
-
-
-def build_auto_insights(filtered):
-    insights = []
-
-    total_tx = len(filtered)
-    total_amount = filtered["Amount Sent"].sum() if "Amount Sent" in filtered.columns else 0
-    cancel_count = filtered["flag_canceled"].sum() if "flag_canceled" in filtered.columns else 0
-    cancel_rate = (cancel_count / total_tx * 100) if total_tx > 0 else 0
-
-    insights.append(f"Total transaksi pada filter saat ini: {format_number(total_tx)}")
-    if "Amount Sent" in filtered.columns:
-        insights.append(f"Total nominal terkirim: {format_currency(total_amount)}")
-    insights.append(f"Persentase transaksi canceled: {format_percent(cancel_rate)}")
-
-    if "Recipient Country" in filtered.columns and not filtered.empty:
-        tg = top_group(filtered, "Recipient Country")
-        if not tg.empty:
-            row = tg.iloc[0]
-            insights.append(
-                f"Negara tujuan terbesar: {row['Recipient Country']} ({format_number(row['transactions'])} transaksi)"
-            )
-
-    if "Platform" in filtered.columns and not filtered.empty:
-        tg = top_group(filtered, "Platform")
-        if not tg.empty:
-            row = tg.iloc[0]
-            insights.append(
-                f"Platform dominan: {row['Platform']} ({format_number(row['transactions'])} transaksi)"
-            )
-
-    risk_count = (filtered["risk_score"] > 0).sum() if "risk_score" in filtered.columns else 0
-    insights.append(f"Jumlah transaksi berisiko: {format_number(risk_count)}")
-    return insights
-
-
-@st.cache_data(ttl=300)
-def monthly_summary(df):
-    if df.empty or "Transaction Date" not in df.columns:
+def repeat_vs_new_summary(df):
+    seg = customer_segments(df)
+    if seg.empty:
         return pd.DataFrame()
 
     out = (
-        df.groupby(["Year", "Month"], dropna=False)
+        seg.groupby("segment", dropna=False)
         .agg(
-            transactions=("Id", "count") if "Id" in df.columns else ("Transaction Date", "count"),
-            total_amount=("Amount Sent", "sum") if "Amount Sent" in df.columns else ("Transaction Date", "count"),
-            risk_transactions=("risk_score", lambda x: (x > 0).sum()) if "risk_score" in df.columns else ("Transaction Date", "count"),
-            canceled_transactions=("flag_canceled", "sum") if "flag_canceled" in df.columns else ("Transaction Date", "count")
+            users=("Name", "count"),
+            total_transactions=("transactions", "sum"),
+            total_amount=("total_amount", "sum")
         )
         .reset_index()
-        .sort_values(["Year", "Month"])
     )
-
-    out["period"] = out["Year"].astype("Int64").astype(str) + "-" + out["Month"].astype("Int64").astype(str).str.zfill(2)
     return out
 
 
-def apply_safe_date_filter(df, label="Custom Date", key="date_range"):
-    if "Transaction Date" not in df.columns or not df["Transaction Date"].notna().any():
-        return df
+@st.cache_data(ttl=300)
+def platform_monthly_growth(df):
+    needed = {"Platform", "Year", "Month"}
+    if not needed.issubset(df.columns) or df.empty:
+        return pd.DataFrame()
 
-    min_dt = df["Transaction Date"].min().date()
-    max_dt = df["Transaction Date"].max().date()
-
-    state_key = f"{key}_state"
-    widget_key = f"{key}_widget"
-
-    current_range = st.session_state.get(state_key, [min_dt, max_dt])
-
-    if not (isinstance(current_range, (list, tuple)) and len(current_range) == 2):
-        current_range = [min_dt, max_dt]
-
-    current_start, current_end = current_range
-
-    if current_start < min_dt or current_start > max_dt:
-        current_start = min_dt
-    if current_end < min_dt or current_end > max_dt:
-        current_end = max_dt
-    if current_start > current_end:
-        current_start, current_end = min_dt, max_dt
-
-    safe_range = [current_start, current_end]
-    st.session_state[state_key] = safe_range
-
-    if widget_key in st.session_state:
-        widget_value = st.session_state[widget_key]
-        if isinstance(widget_value, (list, tuple)) and len(widget_value) == 2:
-            ws, we = widget_value
-            if ws < min_dt or ws > max_dt or we < min_dt or we > max_dt or ws > we:
-                st.session_state[widget_key] = safe_range
-
-    date_range = st.sidebar.date_input(
-        label,
-        value=safe_range,
-        min_value=min_dt,
-        max_value=max_dt,
-        key=widget_key,
+    out = (
+        df.groupby(["Platform", "Year", "Month"], dropna=False)
+        .agg(
+            transactions=("Id", "count") if "Id" in df.columns else ("Platform", "count"),
+            total_amount=("Amount Sent", "sum") if "Amount Sent" in df.columns else ("Platform", "count")
+        )
+        .reset_index()
+        .sort_values(["Platform", "Year", "Month"])
     )
 
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_date, end_date = date_range
-
-        if start_date < min_dt:
-            start_date = min_dt
-        if end_date > max_dt:
-            end_date = max_dt
-        if start_date > end_date:
-            start_date, end_date = min_dt, max_dt
-
-        st.session_state[state_key] = [start_date, end_date]
-
-        return df[
-            (df["Transaction Date"] >= pd.to_datetime(start_date)) &
-            (df["Transaction Date"] < pd.to_datetime(end_date) + pd.Timedelta(days=1))
-        ].copy()
-
-    return df
+    out["period"] = out["Year"].astype("Int64").astype(str) + "-" + out["Month"].astype("Int64").astype(str).str.zfill(2)
+    out["growth_pct"] = out.groupby("Platform")["transactions"].pct_change() * 100
+    return out
 
 
-@st.cache_data
-def convert_df_to_csv(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
+@st.cache_data(ttl=300)
+def country_monthly_growth(df):
+    needed = {"Recipient Country", "Year", "Month"}
+    if not needed.issubset(df.columns) or df.empty:
+        return pd.DataFrame()
+
+    out = (
+        df.groupby(["Recipient Country", "Year", "Month"], dropna=False)
+        .agg(
+            transactions=("Id", "count") if "Id" in df.columns else ("Recipient Country", "count"),
+            total_amount=("Amount Sent", "sum") if "Amount Sent" in df.columns else ("Recipient Country", "count")
+        )
+        .reset_index()
+        .sort_values(["Recipient Country", "Year", "Month"])
+    )
+
+    out["period"] = out["Year"].astype("Int64").astype(str) + "-" + out["Month"].astype("Int64").astype(str).str.zfill(2)
+    out["growth_pct"] = out.groupby("Recipient Country")["transactions"].pct_change() * 100
+    return out
+
+
+@st.cache_data(ttl=300)
+def drop_detection(df, threshold=-30):
+    ms = monthly_summary(df)
+    if ms.empty:
+        return pd.DataFrame()
+
+    ms = ms.copy()
+    ms["growth_pct"] = ms["transactions"].pct_change() * 100
+    return ms[ms["growth_pct"] <= threshold].copy()
+
+
+@st.cache_data(ttl=300)
+def voucher_promo_summary(df):
+    if df.empty:
+        return {}
+
+    voucher_col = first_existing_column(df, ["Voucher Code", "voucher_code", "Voucher", "Kode Voucher"])
+    promo_col = first_existing_column(df, ["Promo Code", "promo_code", "Promo Name", "Promo", "Nama Promo"])
+    discount_col = first_existing_column(df, ["Discount Amount", "discount_amount", "Discount", "Nominal Promo", "Promo Amount"])
+
+    result = {
+        "voucher_col": voucher_col,
+        "promo_col": promo_col,
+        "discount_col": discount_col,
+        "voucher_usage": pd.DataFrame(),
+        "promo_usage": pd.DataFrame(),
+        "promo_vs_nonpromo": pd.DataFrame(),
+    }
+
+    temp = df.copy()
+
+    if discount_col:
+        temp[discount_col] = pd.to_numeric(temp[discount_col], errors="coerce").fillna(0)
+
+    if voucher_col:
+        temp[voucher_col] = temp[voucher_col].astype(str).str.strip()
+        temp[voucher_col] = temp[voucher_col].replace({"nan": "", "None": "", "<NA>": ""})
+
+        voucher_usage = (
+            temp[temp[voucher_col] != ""]
+            .groupby(voucher_col, dropna=False)
+            .agg(
+                transactions=("Id", "count") if "Id" in temp.columns else (voucher_col, "count"),
+                total_amount=("Amount Sent", "sum") if "Amount Sent" in temp.columns else (voucher_col, "count"),
+                avg_amount=("Amount Sent", "mean") if "Amount Sent" in temp.columns else (voucher_col, "count"),
+            )
+            .reset_index()
+            .sort_values(["transactions", "total_amount"], ascending=[False, False])
+        )
+
+        if discount_col and not voucher_usage.empty:
+            discount_map = (
+                temp[temp[voucher_col] != ""]
+                .groupby(voucher_col, dropna=False)[discount_col]
+                .sum()
+                .reset_index(name="total_discount")
+            )
+            voucher_usage = voucher_usage.merge(discount_map, on=voucher_col, how="left")
+
+        result["voucher_usage"] = voucher_usage
+
+    if promo_col:
+        temp[promo_col] = temp[promo_col].astype(str).str.strip()
+        temp[promo_col] = temp[promo_col].replace({"nan": "", "None": "", "<NA>": ""})
+
+        promo_usage = (
+            temp[temp[promo_col] != ""]
+            .groupby(promo_col, dropna=False)
+            .agg(
+                transactions=("Id", "count") if "Id" in temp.columns else (promo_col, "count"),
+                total_amount=("Amount Sent", "sum") if "Amount Sent" in temp.columns else (promo_col, "count"),
+                avg_amount=("Amount Sent", "mean") if "Amount Sent" in temp.columns else (promo_col, "count"),
+            )
+            .reset_index()
+            .sort_values(["transactions", "total_amount"], ascending=[False, False])
+        )
+
+        if discount_col and not promo_usage.empty:
+            discount_map = (
+                temp[temp[promo_col] != ""]
+                .groupby(promo_col, dropna=False)[discount_col]
+                .sum()
+                .reset_index(name="total_discount")
+            )
+            promo_usage = promo_usage.merge(discount_map, on=promo_col, how="left")
+
+        result["promo_usage"] = promo_usage
+
+    if voucher_col or promo_col:
+        has_promo = pd.Series(False, index=temp.index)
+
+        if voucher_col:
+            has_promo = has_promo | (temp[voucher_col] != "")
+        if promo_col:
+            has_promo = has_promo | (temp[promo_col] != "")
+
+        temp["promo_flag"] = has_promo.map({True: "With Promo/Voucher", False: "No Promo/Voucher"})
+
+        promo_vs_nonpromo = (
+            temp.groupby("promo_flag", dropna=False)
+            .agg(
+                transactions=("Id", "count") if "Id" in temp.columns else ("promo_flag", "count"),
+                total_amount=("Amount Sent", "sum") if "Amount Sent" in temp.columns else ("promo_flag", "count"),
+                avg_amount=("Amount Sent", "mean") if "Amount Sent" in temp.columns else ("promo_flag", "count"),
+            )
+            .reset_index()
+        )
+
+        if discount_col:
+            discount_sum = temp.groupby("promo_flag", dropna=False)[discount_col].sum().reset_index(name="total_discount")
+            promo_vs_nonpromo = promo_vs_nonpromo.merge(discount_sum, on="promo_flag", how="left")
+
+        result["promo_vs_nonpromo"] = promo_vs_nonpromo
+
+    return result
+
+
+def build_marketing_advanced_insights(df):
+    insights = []
+
+    if df.empty:
+        return insights
+
+    if "Platform" in df.columns:
+        tg = top_group(df, "Platform")
+        if not tg.empty:
+            row = tg.iloc[0]
+            insights.append(f"Platform paling kuat adalah {row['Platform']} dengan {format_number(row['transactions'])} transaksi.")
+
+    if "Recipient Country" in df.columns:
+        tg = top_group(df, "Recipient Country")
+        if not tg.empty:
+            row = tg.iloc[0]
+            insights.append(f"Negara tujuan teratas adalah {row['Recipient Country']} dengan {format_number(row['transactions'])} transaksi.")
+
+    if "Purpose" in df.columns:
+        tg = top_group(df, "Purpose")
+        if not tg.empty:
+            row = tg.iloc[0]
+            insights.append(f"Purpose paling dominan adalah {row['Purpose']}.")
+
+    seg = repeat_vs_new_summary(df)
+    if not seg.empty:
+        total_users = seg["users"].sum()
+        loyal_users = seg.loc[seg["segment"] == "Loyal", "users"].sum() if "Loyal" in seg["segment"].values else 0
+        new_users = seg.loc[seg["segment"] == "New", "users"].sum() if "New" in seg["segment"].values else 0
+
+        if total_users > 0:
+            loyal_pct = loyal_users / total_users * 100
+            new_pct = new_users / total_users * 100
+            insights.append(f"Komposisi user baru sekitar {format_percent(new_pct)} dan user loyal sekitar {format_percent(loyal_pct)}.")
+
+    drops = drop_detection(df, threshold=-30)
+    if not drops.empty:
+        latest_drop = drops.iloc[-1]
+        insights.append(
+            f"Terdapat penurunan signifikan pada {latest_drop['period']} sebesar {latest_drop['growth_pct']:.2f}% dibanding periode sebelumnya."
+        )
+
+    promo_data = voucher_promo_summary(df)
+    promo_vs_nonpromo = promo_data.get("promo_vs_nonpromo", pd.DataFrame())
+    if not promo_vs_nonpromo.empty and len(promo_vs_nonpromo) >= 2:
+        insights.append("Promo/voucher sudah dapat dibandingkan terhadap transaksi non-promo untuk melihat kualitas volume dan nominal.")
+
+    return insights
