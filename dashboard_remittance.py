@@ -40,31 +40,22 @@ def format_percent(x):
 def load_data():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    sheet_map = {
-        "2023": 0,
-        "2024": 1,
-        "2025": 2,
-        "2026": 3,
-    }
+    try:
+        df = conn.read(ttl=0)
 
-    all_dfs = []
-
-    for label, idx in sheet_map.items():
-        try:
-            df = conn.read(worksheet=idx, ttl=0)
-            if df is not None and not df.empty:
-                df["source_sheet"] = label
-                all_dfs.append(df)
+        if df is not None and not df.empty:
+            if "source_sheet" not in df.columns:
+                st.warning("Kolom 'source_sheet' tidak ditemukan di sheet gabungan.")
             else:
-                st.warning(f"Sheet {label} kosong")
-        except Exception as e:
-            st.warning(f"Gagal membaca sheet {label}: {e}")
+                df["source_sheet"] = df["source_sheet"].astype(str).str.strip()
 
-    if all_dfs:
-        return pd.concat(all_dfs, ignore_index=True)
+            return df
 
-    return pd.DataFrame()
-# =========================
+        return pd.DataFrame()
+
+    except Exception as e:
+        st.error(f"Gagal membaca Google Sheets: {e}")
+        return pd.DataFrame()# =========================
 # CLEANING
 # =========================
 def clean_data(df):
